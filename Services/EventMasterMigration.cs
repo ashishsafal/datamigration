@@ -75,7 +75,7 @@ public class EventMasterMigration : MigrationService
             "EVENTTYPE -> event_type (Transform: 1=RFQ, 2=Forward Auction, 3=Reverse Auction)",
             "CURRENTSTATUS -> event_status (Direct)",
             "PARENTID -> parent_id (Direct, 0 if NULL)",
-            "price_bid_template -> pb buyer table pbtype (Lookup)",
+            "price_bid_template -> TBL_PB_BUYER.PBType (Lookup: 1=material, 14=service)",
             "is_standalone -> 0 (Fixed)",
             "PRICINGSTATUS -> pricing_status (Direct)",
             "ISEXTEND -> event_extended (Direct)",
@@ -156,7 +156,7 @@ public class EventMasterMigration : MigrationService
                             insertCmd.Parameters.AddWithValue("@event_name", reader["EVENTNAME"] ?? DBNull.Value);
                             insertCmd.Parameters.AddWithValue("@event_description", reader["EVENTDESC"] ?? DBNull.Value);
                             insertCmd.Parameters.AddWithValue("@round", reader["ROUND"] != DBNull.Value ? reader["ROUND"] : 0);
-                            
+
                             // Convert EVENTTYPE integer to string
                             string eventType = "";
                             if (reader["EVENTTYPE"] != DBNull.Value)
@@ -171,10 +171,33 @@ public class EventMasterMigration : MigrationService
                                 };
                             }
                             insertCmd.Parameters.AddWithValue("@event_type", string.IsNullOrEmpty(eventType) ? DBNull.Value : eventType);
-                            
+
                             insertCmd.Parameters.AddWithValue("@event_status", reader["CURRENTSTATUS"] ?? DBNull.Value);
                             insertCmd.Parameters.AddWithValue("@parent_id", reader["PARENTID"] != DBNull.Value ? reader["PARENTID"] : 0);
-                            insertCmd.Parameters.AddWithValue("@price_bid_template", DBNull.Value); // TODO: Lookup from pb buyer table
+
+                            // Lookup price_bid_template from TBL_PB_BUYER
+                            string priceBidTemplate = null;
+                            using (var pbConnection = GetSqlServerConnection())
+                            {
+                                await pbConnection.OpenAsync();
+                                using (var pbCmd = new SqlCommand("SELECT PBType FROM TBL_PB_BUYER WHERE SEQUENCEID = 0 AND EVENTID = @eventId", pbConnection))
+                                {
+                                    pbCmd.Parameters.AddWithValue("@eventId", reader["EVENTID"]);
+                                    var pbResult = await pbCmd.ExecuteScalarAsync();
+                                    if (pbResult != null && pbResult != DBNull.Value)
+                                    {
+                                        int pbType = Convert.ToInt32(pbResult);
+                                        priceBidTemplate = pbType switch
+                                        {
+                                            1 => "Material",
+                                            14 => "Service",
+                                            _ => null
+                                        };
+                                    }
+                                }
+                            }
+                            insertCmd.Parameters.AddWithValue("@price_bid_template", string.IsNullOrEmpty(priceBidTemplate) ? DBNull.Value : (object)priceBidTemplate);
+
                             insertCmd.Parameters.AddWithValue("@is_standalone", false);
                             insertCmd.Parameters.AddWithValue("@pricing_status", reader["PRICINGSTATUS"] != DBNull.Value ? Convert.ToBoolean(reader["PRICINGSTATUS"]) : false);
                             insertCmd.Parameters.AddWithValue("@event_extended", reader["ISEXTEND"] != DBNull.Value ? Convert.ToBoolean(reader["ISEXTEND"]) : false);
@@ -245,22 +268,19 @@ public class EventMasterMigration : MigrationService
                         await transaction.CommitAsync();
                         successCount++;
                     }
-                    catch (Exception ex)
+                    catch (Exception)
                     {
                         await transaction.RollbackAsync();
                     }
                 }
-                catch (Exception ex)
+                catch (Exception)
                 {
-                }   
-                
+                }
             }
-
         }
-        catch (Exception ex)
+        catch (Exception)
         {
         }
-
         return successCount;
     }
 }
