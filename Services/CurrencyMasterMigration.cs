@@ -7,60 +7,31 @@ using Npgsql;
 
 public class CurrencyMasterMigration : MigrationService
 {
-    private readonly string _selectQuery = "SELECT CurrencyMastID, Currency_Code, Currency_Name FROM TBL_CURRENCYMASTER";
-    private readonly string _insertQuery = @"INSERT INTO currency_master (currency_id, company_id, currency_code, currency_name, currency_short_name, decimal_places, iso_code, created_by, created_date, modified_by, modified_date, is_deleted, deleted_by, deleted_date) 
+    protected override string SelectQuery => "SELECT CurrencyMastID, Currency_Code, Currency_Name FROM TBL_CURRENCYMASTER";
+    protected override string InsertQuery => @"INSERT INTO currency_master (currency_id, company_id, currency_code, currency_name, currency_short_name, decimal_places, iso_code, created_by, created_date, modified_by, modified_date, is_deleted, deleted_by, deleted_date) 
                                              VALUES (@currency_id, @company_id, @currency_code, @currency_name, @currency_short_name, @decimal_places, @iso_code, @created_by, @created_date, @modified_by, @modified_date, @is_deleted, @deleted_by, @deleted_date)";
 
     public CurrencyMasterMigration(IConfiguration configuration) : base(configuration) { }
 
-    public List<object> GetMappings()
+    protected override List<string> GetLogics()
     {
-        // Parse sources from SELECT
-        var sources = ParseSelectColumns(_selectQuery);
-        // Add defaults for company_id, currency_short_name, decimal_places, iso_code, created_by, created_date, modified_by, modified_date, is_deleted, deleted_by, deleted_date
-        sources.Insert(0, "-"); // company_id before currency_id
-        sources.Add("-"); // currency_short_name
-        sources.Add("-"); // decimal_places
-        sources.Add("-"); // iso_code
-        sources.Add("-"); // created_by
-        sources.Add("-"); // created_date
-        sources.Add("-"); // modified_by
-        sources.Add("-"); // modified_date
-        sources.Add("-"); // is_deleted
-        sources.Add("-"); // deleted_by
-        sources.Add("-"); // deleted_date
-
-        // Parse targets from INSERT
-        var targets = ParseInsertColumns(_insertQuery);
-
-        // Define logics - adjust as needed
-        var logics = new List<string> { "Default: 1", "Direct", "Direct", "Direct", "Default: null", "Default: null", "Default: null", "Default: 0", "Default: Now", "Default: null", "Default: null", "Default: false", "Default: null", "Default: null" };
-
-        // Build mappings
-        var mappings = new List<object>();
-        for (int i = 0; i < sources.Count; i++)
-        {
-            mappings.Add(new { source = sources[i], logic = logics[i], target = targets[i] });
-        }
-        return mappings;
-    }
-
-    private List<string> ParseSelectColumns(string selectQuery)
-    {
-        // Simple parsing: assume "SELECT col1, col2, ... FROM table"
-        var start = selectQuery.IndexOf("SELECT") + 7;
-        var end = selectQuery.IndexOf("FROM");
-        var columnsPart = selectQuery.Substring(start, end - start).Trim();
-        return columnsPart.Split(',').Select(c => c.Trim()).ToList();
-    }
-
-    private List<string> ParseInsertColumns(string insertQuery)
-    {
-        // Simple parsing: assume "INSERT INTO table (col1, col2, ...) VALUES (...)"
-        var start = insertQuery.IndexOf("(") + 1;
-        var end = insertQuery.IndexOf(")");
-        var columnsPart = insertQuery.Substring(start, end - start).Trim();
-        return columnsPart.Split(',').Select(c => c.Trim()).ToList();
+        return new List<string> 
+        { 
+            "Direct",           // currency_id
+            "Default: 1",       // company_id
+            "Direct",           // currency_code
+            "Direct",           // currency_name
+            "Default: null",    // currency_short_name
+            "Default: 2",       // decimal_places
+            "Default: null",    // iso_code
+            "Default: 0",       // created_by
+            "Default: Now",     // created_date
+            "Default: null",    // modified_by
+            "Default: null",    // modified_date
+            "Default: false",   // is_deleted
+            "Default: null",    // deleted_by
+            "Default: null"     // deleted_date
+        };
     }
 
     public async Task<int> MigrateAsync()
@@ -70,10 +41,10 @@ public class CurrencyMasterMigration : MigrationService
         await sqlConn.OpenAsync();
         await pgConn.OpenAsync();
 
-        using var sqlCmd = new SqlCommand(_selectQuery, sqlConn);
+        using var sqlCmd = new SqlCommand(SelectQuery, sqlConn);
         using var reader = await sqlCmd.ExecuteReaderAsync();
 
-        using var pgCmd = new NpgsqlCommand(_insertQuery, pgConn);
+        using var pgCmd = new NpgsqlCommand(InsertQuery, pgConn);
         int insertedCount = 0;
         while (await reader.ReadAsync())
         {

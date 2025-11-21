@@ -15,48 +15,9 @@ services:
     restart: unless-stopped
     networks:
       - migration-network
-    depends_on:
-      - sqlserver
-      - postgres
     volumes:
       - ./logs:/app/logs
-
-  # Optional: SQL Server container (if you want to run SQL Server in Docker)
-  sqlserver:
-    image: mcr.microsoft.com/mssql/server:2022-latest
-    container_name: sqlserver-db
-    environment:
-      - ACCEPT_EULA=Y
-      - SA_PASSWORD=YourStrong@Passw0rd
-      - MSSQL_PID=Express
-    ports:
-      - "1433:1433"
-    volumes:
-      - sqlserver-data:/var/opt/mssql
-    restart: unless-stopped
-    networks:
-      - migration-network
-
-  # Optional: PostgreSQL container (if you want to run PostgreSQL in Docker)
-  postgres:
-    image: postgres:16
-    container_name: postgres-db
-    environment:
-      - POSTGRES_DB=navikaran_mig
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres123
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    restart: unless-stopped
-    networks:
-      - migration-network
 
 networks:
   migration-network:
     driver: bridge
-
-volumes:
-  sqlserver-data:
-  postgres-data:

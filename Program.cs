@@ -11,7 +11,7 @@ builder.Services.AddCors(options =>
                .AllowAnyHeader();
     });
 });
-builder.Services.AddScoped<MigrationService>();
+// Register migration services
 builder.Services.AddScoped<UOMMasterMigration>();
 builder.Services.AddScoped<PlantMasterMigration>();
 builder.Services.AddScoped<CurrencyMasterMigration>();
