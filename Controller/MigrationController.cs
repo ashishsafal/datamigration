@@ -13,6 +13,10 @@ public class MigrationController : Controller
     private readonly PaymentTermMasterMigration _paymentTermMigration;
     private readonly MaterialMasterMigration _materialMigration;
     private readonly EventMasterMigration _eventMigration;
+    private readonly TaxMasterMigration _taxMigration;
+    private readonly UsersMasterMigration _usersmasterMigration;
+    private readonly ErpPrLinesMigration _erpprlinesMigration;
+
 
     public MigrationController(
         UOMMasterMigration uomMigration, 
@@ -22,7 +26,10 @@ public class MigrationController : Controller
         PurchaseGroupMasterMigration purchaseGroupMigration,
         PaymentTermMasterMigration paymentTermMigration,
         MaterialMasterMigration materialMigration,
-        EventMasterMigration eventMigration)
+        EventMasterMigration eventMigration,
+        TaxMasterMigration taxMigration,
+        UsersMasterMigration usersmasterMigration,
+        ErpPrLinesMigration erpprlinesMigration)
     {
         _uomMigration = uomMigration;
         _plantMigration = plantMigration;
@@ -32,6 +39,9 @@ public class MigrationController : Controller
         _paymentTermMigration = paymentTermMigration;
         _materialMigration = materialMigration;
         _eventMigration = eventMigration;
+        _taxMigration = taxMigration;
+        _usersmasterMigration = usersmasterMigration;
+        _erpprlinesMigration = erpprlinesMigration;
     }
 
     public IActionResult Index()
@@ -51,7 +61,10 @@ public class MigrationController : Controller
             new { name = "purchasegroup", description = "TBL_PurchaseGroupMaster to purchase_group_master" },
             new { name = "paymentterm", description = "TBL_PAYMENTTERMMASTER to payment_term_master" },
             new { name = "material", description = "TBL_ITEMMASTER to material_master" },
-            new { name = "eventmaster", description = "TBL_EVENTMASTER to event_master + event_setting" }
+            new { name = "eventmaster", description = "TBL_EVENTMASTER to event_master + event_setting" },
+            new { name = "tax", description = "TBL_TaxMaster to tax_master" },
+            new { name = "users", description = "TBL_USERMASTERFINAL to users" },
+            new { name = "erpprlines", description = "TBL_PRTRANSACTION to erp_pr_lines" },
         };
         return Json(tables);
     }
@@ -99,6 +112,21 @@ public class MigrationController : Controller
             var mappings = _eventMigration.GetMappings();
             return Json(mappings);
         }
+        else if (table.ToLower() == "tax")
+        {
+            var mappings = _taxMigration.GetMappings();      
+            return Json(mappings);
+        }
+        else if (table.ToLower() == "users")
+        {
+            var mappings = _usersmasterMigration.GetMappings();       
+            return Json(mappings);
+        }
+        else if (table.ToLower() == "erp_pr_lines")
+        {
+            var mappings = _erpprlinesMigration.GetMappings();
+            return Json(mappings);
+        }
         return Json(new List<object>());
     }
 
@@ -106,9 +134,7 @@ public class MigrationController : Controller
     public async Task<IActionResult> MigrateAsync([FromBody] MigrationRequest request)
     {
         try
-        {
-            
-            
+        {   
             // Handle other migration types (keeping existing logic)
             int recordCount = 0;
             if (request.Table.ToLower() == "uom")
@@ -160,6 +186,18 @@ public class MigrationController : Controller
                         errors = result.Errors.Take(5).ToList() // Return first 5 errors
                     }
                 });
+            }
+            else if (request.Table.ToLower() == "tax")
+            {
+                recordCount = await _taxMigration.MigrateAsync(); // 6. Migrate tax data
+            }
+            else if (request.Table.ToLower() == "users")
+            {
+                recordCount = await _usersmasterMigration.MigrateAsync();
+            }
+            else if (request.Table.ToLower() == "erp_pr_lines")
+            {
+                recordCount = await _erpprlinesMigration.MigrateAsync();
             }
             else
             {
