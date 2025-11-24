@@ -107,6 +107,9 @@ public class MigrationController : Controller
     {
         try
         {
+            
+            
+            // Handle other migration types (keeping existing logic)
             int recordCount = 0;
             if (request.Table.ToLower() == "uom")
             {
@@ -138,12 +141,31 @@ public class MigrationController : Controller
             }
             else if (request.Table.ToLower() == "eventmaster")
             {
-                recordCount = await _eventMigration.MigrateAsync();
+                var result = await _eventMigration.MigrateAsync();
+                var message = $"Migration completed for {request.Table}. Success: {result.SuccessCount}, Failed: {result.FailedCount}";
+
+                if (result.Errors.Any())
+                {
+                    message += $", Errors: {result.Errors.Count}";
+                }
+
+                return Json(new
+                {
+                    success = true,
+                    message = message,
+                    details = new
+                    {
+                        successCount = result.SuccessCount,
+                        failedCount = result.FailedCount,
+                        errors = result.Errors.Take(5).ToList() // Return first 5 errors
+                    }
+                });
             }
             else
             {
                 return Json(new { success = false, error = "Unknown table" });
             }
+            
             return Json(new { success = true, message = $"Migration completed for {request.Table}. {recordCount} records migrated." });
         }
         catch (Exception ex)

@@ -4,8 +4,11 @@ using System.Data;
 
 public class EventMasterMigration : MigrationService
 {
-    public EventMasterMigration(IConfiguration configuration) : base(configuration)
+    private readonly ILogger<EventMasterMigration> _logger;
+
+    public EventMasterMigration(IConfiguration configuration, ILogger<EventMasterMigration> logger) : base(configuration)
     {
+        _logger = logger;
     }
 
     protected override string SelectQuery => @"
@@ -21,7 +24,8 @@ public class EventMasterMigration : MigrationService
             LotLevelBasicPrice, IsPriceBidAttachmentcompulsory, IsDiscountApplicable,
             IsGSTCompulsory, IsTechnicalAttachmentcompulsory, IsProposedQty, IsRedyStockmandatory,
             MinBidMode, MaxBidMode
-        FROM TBL_EVENTMASTER";
+        FROM TBL_EVENTMASTER
+        ORDER BY EVENTID";
 
     protected override string InsertQuery => @"
         INSERT INTO event_master (
@@ -123,164 +127,312 @@ public class EventMasterMigration : MigrationService
         };
     }
 
-    public async Task<int> MigrateAsync()
+    public async Task<(int SuccessCount, int FailedCount, List<string> Errors)> MigrateAsync()
     {
         int successCount = 0;
+        int failedCount = 0;
+        var errors = new List<string>();
+        int totalRecords = 0;
 
         try
         {
+            _logger.LogInformation("Starting EventMaster migration...");
+
             using var sqlConnection = GetSqlServerConnection();
             using var pgConnection = GetPostgreSqlConnection();
 
             await sqlConnection.OpenAsync();
             await pgConnection.OpenAsync();
 
+            _logger.LogInformation("Database connections established successfully");
+
+            // First, get total count for progress tracking
+            using (var countCmd = new SqlCommand("SELECT COUNT(*) FROM TBL_EVENTMASTER", sqlConnection))
+            {
+                totalRecords = (int)await countCmd.ExecuteScalarAsync();
+                _logger.LogInformation($"Total records to migrate: {totalRecords}");
+            }
+
             using var sqlCommand = new SqlCommand(SelectQuery, sqlConnection);
             using var reader = await sqlCommand.ExecuteReaderAsync();
 
             while (await reader.ReadAsync())
             {
+                var eventId = reader["EVENTID"];
+                var eventCode = reader["EVENTCODE"]?.ToString() ?? "NULL";
+
                 try
                 {
                     using var transaction = await pgConnection.BeginTransactionAsync();
 
                     try
                     {
-                        // Insert into event_master and get the generated event_id
-                        int eventId;
-                        using (var insertCmd = new NpgsqlCommand(InsertQuery, pgConnection, transaction))
+                        _logger.LogDebug($"Processing Event ID: {eventId}, Code: {eventCode}");
+
+                        // Check if record already exists
+                        bool recordExists = false;
+                        using (var checkCmd = new NpgsqlCommand("SELECT COUNT(*) FROM event_master WHERE event_id = @event_id", pgConnection, transaction))
                         {
-                            // Event Master fields
-                            insertCmd.Parameters.AddWithValue("@event_id", reader["EVENTID"]);
-                            insertCmd.Parameters.AddWithValue("@event_code", reader["EVENTCODE"] ?? DBNull.Value);
-                            insertCmd.Parameters.AddWithValue("@event_name", reader["EVENTNAME"] ?? DBNull.Value);
-                            insertCmd.Parameters.AddWithValue("@event_description", reader["EVENTDESC"] ?? DBNull.Value);
-                            insertCmd.Parameters.AddWithValue("@round", reader["ROUND"] != DBNull.Value ? reader["ROUND"] : 0);
-
-                            // Convert EVENTTYPE integer to string
-                            string eventType = "";
-                            if (reader["EVENTTYPE"] != DBNull.Value)
-                            {
-                                int eventTypeValue = Convert.ToInt32(reader["EVENTTYPE"]);
-                                eventType = eventTypeValue switch
-                                {
-                                    1 => "RFQ",
-                                    2 => "Forward Auction",
-                                    3 => "Reverse Auction",
-                                    _ => reader["EVENTTYPE"].ToString()
-                                };
-                            }
-                            insertCmd.Parameters.AddWithValue("@event_type", string.IsNullOrEmpty(eventType) ? DBNull.Value : eventType);
-
-                            insertCmd.Parameters.AddWithValue("@event_status", reader["CURRENTSTATUS"] ?? DBNull.Value);
-                            insertCmd.Parameters.AddWithValue("@parent_id", reader["PARENTID"] != DBNull.Value ? reader["PARENTID"] : 0);
-
-                            // Lookup price_bid_template from TBL_PB_BUYER
-                            string priceBidTemplate = null;
-                            using (var pbConnection = GetSqlServerConnection())
-                            {
-                                await pbConnection.OpenAsync();
-                                using (var pbCmd = new SqlCommand("SELECT PBType FROM TBL_PB_BUYER WHERE SEQUENCEID = 0 AND EVENTID = @eventId", pbConnection))
-                                {
-                                    pbCmd.Parameters.AddWithValue("@eventId", reader["EVENTID"]);
-                                    var pbResult = await pbCmd.ExecuteScalarAsync();
-                                    if (pbResult != null && pbResult != DBNull.Value)
-                                    {
-                                        int pbType = Convert.ToInt32(pbResult);
-                                        priceBidTemplate = pbType switch
-                                        {
-                                            1 => "Material",
-                                            14 => "Service",
-                                            _ => null
-                                        };
-                                    }
-                                }
-                            }
-                            insertCmd.Parameters.AddWithValue("@price_bid_template", string.IsNullOrEmpty(priceBidTemplate) ? DBNull.Value : (object)priceBidTemplate);
-
-                            insertCmd.Parameters.AddWithValue("@is_standalone", false);
-                            insertCmd.Parameters.AddWithValue("@pricing_status", reader["PRICINGSTATUS"] != DBNull.Value ? Convert.ToBoolean(reader["PRICINGSTATUS"]) : false);
-                            insertCmd.Parameters.AddWithValue("@event_extended", reader["ISEXTEND"] != DBNull.Value ? Convert.ToBoolean(reader["ISEXTEND"]) : false);
-                            insertCmd.Parameters.AddWithValue("@event_currency_id", reader["EventCurrencyId"] != DBNull.Value ? reader["EventCurrencyId"] : 0);
-                            insertCmd.Parameters.AddWithValue("@disable_mail_in_next_round", reader["IschkIsSendMail"] != DBNull.Value ? Convert.ToBoolean(reader["IschkIsSendMail"]) : false);
-                            insertCmd.Parameters.AddWithValue("@company_id", reader["ClientSAPId"] != DBNull.Value ? reader["ClientSAPId"] : 0);
-                            insertCmd.Parameters.AddWithValue("@technical_approval_send_date", reader["TechnicalApprovalSendDate"] ?? DBNull.Value);
-                            insertCmd.Parameters.AddWithValue("@technical_approval_approved_date", reader["TechnicalApprovalApprovedDate"] ?? DBNull.Value);
-                            insertCmd.Parameters.AddWithValue("@technical_approval_status", reader["TechnicalApprovalStatus"] ?? DBNull.Value);
-                            insertCmd.Parameters.AddWithValue("@created_by", 0);
-                            insertCmd.Parameters.AddWithValue("@created_date", DateTime.Now);
-
-                            eventId = (int)await insertCmd.ExecuteScalarAsync();
+                            checkCmd.Parameters.AddWithValue("@event_id", eventId);
+                            var count = (long)await checkCmd.ExecuteScalarAsync();
+                            recordExists = count > 0;
                         }
 
-                        // Insert into event_setting
+                        if (recordExists)
+                        {
+                            _logger.LogWarning($"Event ID {eventId} already exists, skipping...");
+                            await transaction.RollbackAsync();
+                            continue;
+                        }
+
+                        // Insert into event_master and get the generated event_id
+                        int newEventId;
+                        using (var insertCmd = new NpgsqlCommand(InsertQuery, pgConnection, transaction))
+                        {
+                            try
+                            {
+                                // Event Master fields with proper null handling
+                                insertCmd.Parameters.AddWithValue("@event_id", eventId ?? DBNull.Value);
+                                insertCmd.Parameters.AddWithValue("@event_code", reader["EVENTCODE"] ?? DBNull.Value);
+                                insertCmd.Parameters.AddWithValue("@event_name", reader["EVENTNAME"] ?? DBNull.Value);
+                                insertCmd.Parameters.AddWithValue("@event_description", reader["EVENTDESC"] ?? DBNull.Value);
+                                insertCmd.Parameters.AddWithValue("@round", reader["ROUND"] != DBNull.Value ? reader["ROUND"] : 0);
+
+                                // Convert EVENTTYPE integer to string with validation
+                                string eventType = "";
+                                if (reader["EVENTTYPE"] != DBNull.Value)
+                                {
+                                    if (int.TryParse(reader["EVENTTYPE"].ToString(), out int eventTypeValue))
+                                    {
+                                        eventType = eventTypeValue switch
+                                        {
+                                            1 => "RFQ",
+                                            2 => "Forward Auction",
+                                            3 => "Reverse Auction",
+                                            _ => $"Unknown_{eventTypeValue}"
+                                        };
+                                    }
+                                    else
+                                    {
+                                        eventType = reader["EVENTTYPE"].ToString();
+                                    }
+                                }
+                                insertCmd.Parameters.AddWithValue("@event_type", string.IsNullOrEmpty(eventType) ? DBNull.Value : eventType);
+
+                                insertCmd.Parameters.AddWithValue("@event_status", reader["CURRENTSTATUS"] ?? DBNull.Value);
+                                insertCmd.Parameters.AddWithValue("@parent_id", reader["PARENTID"] != DBNull.Value ? reader["PARENTID"] : 0);
+
+                                // Lookup price_bid_template from TBL_PB_BUYER with improved error handling
+                                string priceBidTemplate = null;
+                                try
+                                {
+                                    using (var pbConnection = GetSqlServerConnection())
+                                    {
+                                        await pbConnection.OpenAsync();
+                                        using (var pbCmd = new SqlCommand("SELECT TOP 1 PBType FROM TBL_PB_BUYER WHERE SEQUENCEID = 0 AND EVENTID = @eventId", pbConnection))
+                                        {
+                                            pbCmd.Parameters.AddWithValue("@eventId", eventId);
+                                            var pbResult = await pbCmd.ExecuteScalarAsync();
+                                            if (pbResult != null && pbResult != DBNull.Value)
+                                            {
+                                                if (int.TryParse(pbResult.ToString(), out int pbType))
+                                                {
+                                                    priceBidTemplate = pbType switch
+                                                    {
+                                                        1 => "Material",
+                                                        14 => "Service",
+                                                        _ => $"Type_{pbType}"
+                                                    };
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                catch (Exception pbEx)
+                                {
+                                    _logger.LogWarning($"Failed to lookup price_bid_template for Event ID {eventId}: {pbEx.Message}");
+                                }
+                                
+                                insertCmd.Parameters.AddWithValue("@price_bid_template", string.IsNullOrEmpty(priceBidTemplate) ? DBNull.Value : (object)priceBidTemplate);
+
+                                // Safe boolean conversions
+                                insertCmd.Parameters.AddWithValue("@is_standalone", false);
+                                insertCmd.Parameters.AddWithValue("@pricing_status", SafeConvertToBoolean(reader["PRICINGSTATUS"]));
+                                insertCmd.Parameters.AddWithValue("@event_extended", SafeConvertToBoolean(reader["ISEXTEND"]));
+                                insertCmd.Parameters.AddWithValue("@event_currency_id", SafeConvertToInt(reader["EventCurrencyId"]));
+                                insertCmd.Parameters.AddWithValue("@disable_mail_in_next_round", SafeConvertToBoolean(reader["IschkIsSendMail"]));
+                                insertCmd.Parameters.AddWithValue("@company_id", SafeConvertToInt(reader["ClientSAPId"]));
+                                insertCmd.Parameters.AddWithValue("@technical_approval_send_date", reader["TechnicalApprovalSendDate"] ?? DBNull.Value);
+                                insertCmd.Parameters.AddWithValue("@technical_approval_approved_date", reader["TechnicalApprovalApprovedDate"] ?? DBNull.Value);
+                                insertCmd.Parameters.AddWithValue("@technical_approval_status", reader["TechnicalApprovalStatus"] ?? DBNull.Value);
+                                insertCmd.Parameters.AddWithValue("@created_by", 0);
+                                insertCmd.Parameters.AddWithValue("@created_date", DateTime.Now);
+
+                                var result = await insertCmd.ExecuteScalarAsync();
+                                newEventId = Convert.ToInt32(result);
+
+                                _logger.LogDebug($"Successfully inserted event_master record for Event ID: {eventId}");
+                            }
+                            catch (Exception insertEx)
+                            {
+                                var error = $"Failed to insert event_master for Event ID {eventId}: {insertEx.Message}";
+                                _logger.LogError(error);
+                                errors.Add(error);
+                                throw;
+                            }
+                        }
+
+                        // Insert into event_setting with improved error handling
                         using (var settingCmd = new NpgsqlCommand(InsertEventSettingQuery, pgConnection, transaction))
                         {
-                            settingCmd.Parameters.AddWithValue("@event_id", eventId);
-                            settingCmd.Parameters.AddWithValue("@event_mode", reader["EventMode"] ?? DBNull.Value);
-                            settingCmd.Parameters.AddWithValue("@tie_prevent_lot", reader["TiePreventLot"] != DBNull.Value ? Convert.ToBoolean(reader["TiePreventLot"]) : false);
-                            settingCmd.Parameters.AddWithValue("@tie_prevent_item", reader["TiePreventItem"] != DBNull.Value ? Convert.ToBoolean(reader["TiePreventItem"]) : false);
-                            settingCmd.Parameters.AddWithValue("@target_price_applicable", reader["IsTargetPriceApplicable"] != DBNull.Value ? Convert.ToBoolean(reader["IsTargetPriceApplicable"]) : false);
-                            settingCmd.Parameters.AddWithValue("@auto_extended_enable", reader["IsAutoExtendedEnable"] != DBNull.Value ? Convert.ToBoolean(reader["IsAutoExtendedEnable"]) : false);
-                            settingCmd.Parameters.AddWithValue("@no_of_times_auto_extended", reader["NoofTimesAutoExtended"] != DBNull.Value ? reader["NoofTimesAutoExtended"] : 0);
-                            settingCmd.Parameters.AddWithValue("@auto_extended_minutes", reader["AutoExtendedMinutes"] != DBNull.Value ? reader["AutoExtendedMinutes"] : 0);
-                            settingCmd.Parameters.AddWithValue("@apply_extended_times", reader["ApplyExtendedTimes"] != DBNull.Value ? Convert.ToBoolean(reader["ApplyExtendedTimes"]) : false);
-                            settingCmd.Parameters.AddWithValue("@green_percentage", reader["GREENPERCENTAGE"] != DBNull.Value ? reader["GREENPERCENTAGE"] : 0);
-                            settingCmd.Parameters.AddWithValue("@yellow_percentage", reader["YELLOWPERCENTAGE"] != DBNull.Value ? reader["YELLOWPERCENTAGE"] : 0);
-                            settingCmd.Parameters.AddWithValue("@show_item_level_rank", reader["IsItemLevelRankShow"] != DBNull.Value ? Convert.ToBoolean(reader["IsItemLevelRankShow"]) : false);
-                            settingCmd.Parameters.AddWithValue("@show_lot_level_rank", reader["IsLotLevelRankShow"] != DBNull.Value ? Convert.ToBoolean(reader["IsLotLevelRankShow"]) : false);
-
-                            // Conditional logic for basic_price_applicable
-                            var isLotLevelAuction = reader["IsLotLevelAuction"] != DBNull.Value && Convert.ToBoolean(reader["IsLotLevelAuction"]);
-                            if (isLotLevelAuction)
+                            try
                             {
-                                settingCmd.Parameters.AddWithValue("@basic_price_applicable", Convert.ToBoolean(reader["IsLotLevelAuction"]));
+                                settingCmd.Parameters.AddWithValue("@event_id", newEventId);
+                                settingCmd.Parameters.AddWithValue("@event_mode", reader["EventMode"] ?? DBNull.Value);
+                                settingCmd.Parameters.AddWithValue("@tie_prevent_lot", SafeConvertToBoolean(reader["TiePreventLot"]));
+                                settingCmd.Parameters.AddWithValue("@tie_prevent_item", SafeConvertToBoolean(reader["TiePreventItem"]));
+                                settingCmd.Parameters.AddWithValue("@target_price_applicable", SafeConvertToBoolean(reader["IsTargetPriceApplicable"]));
+                                settingCmd.Parameters.AddWithValue("@auto_extended_enable", SafeConvertToBoolean(reader["IsAutoExtendedEnable"]));
+                                settingCmd.Parameters.AddWithValue("@no_of_times_auto_extended", SafeConvertToInt(reader["NoofTimesAutoExtended"]));
+                                settingCmd.Parameters.AddWithValue("@auto_extended_minutes", SafeConvertToInt(reader["AutoExtendedMinutes"]));
+                                settingCmd.Parameters.AddWithValue("@apply_extended_times", SafeConvertToBoolean(reader["ApplyExtendedTimes"]));
+                                settingCmd.Parameters.AddWithValue("@green_percentage", SafeConvertToDecimal(reader["GREENPERCENTAGE"]));
+                                settingCmd.Parameters.AddWithValue("@yellow_percentage", SafeConvertToDecimal(reader["YELLOWPERCENTAGE"]));
+                                settingCmd.Parameters.AddWithValue("@show_item_level_rank", SafeConvertToBoolean(reader["IsItemLevelRankShow"]));
+                                settingCmd.Parameters.AddWithValue("@show_lot_level_rank", SafeConvertToBoolean(reader["IsLotLevelRankShow"]));
+
+                                // Conditional logic for basic_price_applicable
+                                var isLotLevelAuction = SafeConvertToBoolean(reader["IsLotLevelAuction"]);
+                                if (isLotLevelAuction)
+                                {
+                                    settingCmd.Parameters.AddWithValue("@basic_price_applicable", isLotLevelAuction);
+                                }
+                                else
+                                {
+                                    settingCmd.Parameters.AddWithValue("@basic_price_applicable", SafeConvertToBoolean(reader["IsBasicPriceApplicable"]));
+                                }
+
+                                settingCmd.Parameters.AddWithValue("@basic_price_validation_mandatory", SafeConvertToBoolean(reader["IsBasicPriceValidationReq"]));
+                                settingCmd.Parameters.AddWithValue("@min_max_bid_applicable", SafeConvertToBoolean(reader["IsMinMaxBidApplicable"]));
+                                settingCmd.Parameters.AddWithValue("@show_lower_bid", SafeConvertToBoolean(reader["IsLowestBidShow"]));
+                                settingCmd.Parameters.AddWithValue("@apply_all_settings_in_price_bid", SafeConvertToBoolean(reader["BesideAuctionFirstBid"]));
+                                settingCmd.Parameters.AddWithValue("@min_lot_auction_bid_value", SafeConvertToDecimal(reader["MinBid"]));
+                                settingCmd.Parameters.AddWithValue("@max_lot_auction_bid_value", SafeConvertToDecimal(reader["MaxBid"]));
+                                settingCmd.Parameters.AddWithValue("@configure_lot_level_auction", SafeConvertToBoolean(reader["IsLotLevelAuction"]));
+                                settingCmd.Parameters.AddWithValue("@lot_level_basic_price", SafeConvertToDecimal(reader["LotLevelBasicPrice"]));
+                                settingCmd.Parameters.AddWithValue("@price_bid_attachment_mandatory", SafeConvertToBoolean(reader["IsPriceBidAttachmentcompulsory"]));
+                                settingCmd.Parameters.AddWithValue("@discount_applicable", SafeConvertToBoolean(reader["IsDiscountApplicable"]));
+                                settingCmd.Parameters.AddWithValue("@gst_mandatory", SafeConvertToBoolean(reader["IsGSTCompulsory"]));
+                                settingCmd.Parameters.AddWithValue("@technical_attachment_mandatory", SafeConvertToBoolean(reader["IsTechnicalAttachmentcompulsory"]));
+                                settingCmd.Parameters.AddWithValue("@proposed_qty", SafeConvertToBoolean(reader["IsProposedQty"]));
+                                settingCmd.Parameters.AddWithValue("@ready_stock_mandatory", SafeConvertToBoolean(reader["IsRedyStockmandatory"]));
+                                settingCmd.Parameters.AddWithValue("@created_by", 0);
+                                settingCmd.Parameters.AddWithValue("@created_date", DateTime.Now);
+                                settingCmd.Parameters.AddWithValue("@lot_level_target_price", 0);
+                                settingCmd.Parameters.AddWithValue("@max_lot_bid_type", reader["MinBidMode"] ?? DBNull.Value);
+                                settingCmd.Parameters.AddWithValue("@min_lot_bid_type", reader["MaxBidMode"] ?? DBNull.Value);
+                                settingCmd.Parameters.AddWithValue("@allow_currency_selection", false);
+
+                                await settingCmd.ExecuteNonQueryAsync();
+
+                                _logger.LogDebug($"Successfully inserted event_setting record for Event ID: {eventId}");
                             }
-                            else
+                            catch (Exception settingEx)
                             {
-                                settingCmd.Parameters.AddWithValue("@basic_price_applicable", reader["IsBasicPriceApplicable"] != DBNull.Value ? Convert.ToBoolean(reader["IsBasicPriceApplicable"]) : false);
+                                var error = $"Failed to insert event_setting for Event ID {eventId}: {settingEx.Message}";
+                                _logger.LogError(error);
+                                errors.Add(error);
+                                throw;
                             }
-
-                            settingCmd.Parameters.AddWithValue("@basic_price_validation_mandatory", reader["IsBasicPriceValidationReq"] != DBNull.Value ? Convert.ToBoolean(reader["IsBasicPriceValidationReq"]) : false);
-                            settingCmd.Parameters.AddWithValue("@min_max_bid_applicable", reader["IsMinMaxBidApplicable"] != DBNull.Value ? Convert.ToBoolean(reader["IsMinMaxBidApplicable"]) : false);
-                            settingCmd.Parameters.AddWithValue("@show_lower_bid", reader["IsLowestBidShow"] != DBNull.Value ? Convert.ToBoolean(reader["IsLowestBidShow"]) : false);
-                            settingCmd.Parameters.AddWithValue("@apply_all_settings_in_price_bid", reader["BesideAuctionFirstBid"] != DBNull.Value ? Convert.ToBoolean(reader["BesideAuctionFirstBid"]) : false);
-                            settingCmd.Parameters.AddWithValue("@min_lot_auction_bid_value", reader["MinBid"] != DBNull.Value ? reader["MinBid"] : 0);
-                            settingCmd.Parameters.AddWithValue("@max_lot_auction_bid_value", reader["MaxBid"] != DBNull.Value ? reader["MaxBid"] : 0);
-                            settingCmd.Parameters.AddWithValue("@configure_lot_level_auction", reader["IsLotLevelAuction"] != DBNull.Value ? Convert.ToBoolean(reader["IsLotLevelAuction"]) : false);
-                            settingCmd.Parameters.AddWithValue("@lot_level_basic_price", reader["LotLevelBasicPrice"] != DBNull.Value ? reader["LotLevelBasicPrice"] : 0);
-                            settingCmd.Parameters.AddWithValue("@price_bid_attachment_mandatory", reader["IsPriceBidAttachmentcompulsory"] != DBNull.Value ? Convert.ToBoolean(reader["IsPriceBidAttachmentcompulsory"]) : false);
-                            settingCmd.Parameters.AddWithValue("@discount_applicable", reader["IsDiscountApplicable"] != DBNull.Value ? Convert.ToBoolean(reader["IsDiscountApplicable"]) : false);
-                            settingCmd.Parameters.AddWithValue("@gst_mandatory", reader["IsGSTCompulsory"] != DBNull.Value ? Convert.ToBoolean(reader["IsGSTCompulsory"]) : false);
-                            settingCmd.Parameters.AddWithValue("@technical_attachment_mandatory", reader["IsTechnicalAttachmentcompulsory"] != DBNull.Value ? Convert.ToBoolean(reader["IsTechnicalAttachmentcompulsory"]) : false);
-                            settingCmd.Parameters.AddWithValue("@proposed_qty", reader["IsProposedQty"] != DBNull.Value ? Convert.ToBoolean(reader["IsProposedQty"]) : false);
-                            settingCmd.Parameters.AddWithValue("@ready_stock_mandatory", reader["IsRedyStockmandatory"] != DBNull.Value ? Convert.ToBoolean(reader["IsRedyStockmandatory"]) : false);
-                            settingCmd.Parameters.AddWithValue("@created_by", 0);
-                            settingCmd.Parameters.AddWithValue("@created_date", DateTime.Now);
-                            settingCmd.Parameters.AddWithValue("@lot_level_target_price", 0);
-                            settingCmd.Parameters.AddWithValue("@max_lot_bid_type", reader["MinBidMode"] ?? DBNull.Value);
-                            settingCmd.Parameters.AddWithValue("@min_lot_bid_type", reader["MaxBidMode"] ?? DBNull.Value);
-                            settingCmd.Parameters.AddWithValue("@allow_currency_selection", false);
-
-                            await settingCmd.ExecuteNonQueryAsync();
                         }
 
                         await transaction.CommitAsync();
                         successCount++;
+
+                        if (successCount % 100 == 0)
+                        {
+                            _logger.LogInformation($"Migrated {successCount}/{totalRecords} records successfully");
+                        }
                     }
-                    catch (Exception)
+                    catch (Exception transactionEx)
                     {
-                        await transaction.RollbackAsync();
+                        var error = $"Transaction failed for Event ID {eventId}: {transactionEx.Message}";
+                        _logger.LogError(error);
+                        errors.Add(error);
+                        failedCount++;
+                        
+                        try
+                        {
+                            await transaction.RollbackAsync();
+                        }
+                        catch (Exception rollbackEx)
+                        {
+                            _logger.LogError($"Failed to rollback transaction for Event ID {eventId}: {rollbackEx.Message}");
+                        }
                     }
                 }
-                catch (Exception)
+                catch (Exception recordEx)
                 {
+                    var error = $"Failed to process Event ID {eventId}: {recordEx.Message}";
+                    _logger.LogError(error);
+                    errors.Add(error);
+                    failedCount++;
                 }
             }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            var error = $"Migration failed with exception: {ex.Message}";
+            _logger.LogError(error);
+            errors.Add(error);
         }
-        return successCount;
+
+        _logger.LogInformation($"EventMaster migration completed. Success: {successCount}, Failed: {failedCount}, Total: {totalRecords}");
+        
+        if (errors.Any())
+        {
+            _logger.LogWarning($"Migration completed with {errors.Count} errors:");
+            foreach (var error in errors.Take(10)) // Log first 10 errors
+            {
+                _logger.LogWarning($"  - {error}");
+            }
+        }
+
+        return (successCount, failedCount, errors);
+    }
+
+    private bool SafeConvertToBoolean(object value)
+    {
+        if (value == null || value == DBNull.Value) return false;
+        
+        if (value is bool boolValue) return boolValue;
+        
+        if (bool.TryParse(value.ToString(), out bool result)) return result;
+        
+        if (int.TryParse(value.ToString(), out int intValue)) return intValue != 0;
+        
+        return false;
+    }
+
+    private int SafeConvertToInt(object value)
+    {
+        if (value == null || value == DBNull.Value) return 0;
+        
+        if (value is int intValue) return intValue;
+        
+        if (int.TryParse(value.ToString(), out int result)) return result;
+        
+        return 0;
+    }
+
+    private decimal SafeConvertToDecimal(object value)
+    {
+        if (value == null || value == DBNull.Value) return 0;
+        
+        if (value is decimal decimalValue) return decimalValue;
+        
+        if (decimal.TryParse(value.ToString(), out decimal result)) return result;
+        
+        return 0;
     }
 }
