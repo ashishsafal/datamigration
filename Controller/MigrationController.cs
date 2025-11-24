@@ -49,6 +49,7 @@ public class MigrationController : Controller
         return View();
     }
 
+
     [HttpGet("GetTables")]
     public IActionResult GetTables()
     {
